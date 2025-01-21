@@ -60,15 +60,15 @@ class rk_save_image_v01:
         Resolution info is displayed automatically by ComfyUI (width/height).
         """
 
-        # --- 1) ComfyUI default output folder ---
+        # (1) ComfyUI default output folder
         comfyui_output_dir = folder_paths.get_output_directory()
         os.makedirs(comfyui_output_dir, exist_ok=True)
 
-        # --- 2) Optional custom folder (second copy) ---
+        # (2) Optional custom folder (second copy)
         custom_dir = None
         if enable_custom_path and custom_path.strip():
-            # Strip any accidental surrounding quotes or whitespace
-            sanitized_path = custom_path.strip().strip('"').strip("'")
+            # Remove all instances of quotes from the path
+            sanitized_path = custom_path.strip().replace('"', '').replace("'", '')
             custom_dir = sanitized_path
             # Attempt to create the folder
             os.makedirs(custom_dir, exist_ok=True)
@@ -94,7 +94,7 @@ class rk_save_image_v01:
             arr = 255.0 * image.cpu().numpy()
             img = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
 
-            # --- Watermark ---
+            # Watermark
             if enable_watermark:
                 banner_height = 50
                 new_img = Image.new('RGB', (img.width, img.height + banner_height), color='black')
@@ -102,24 +102,22 @@ class rk_save_image_v01:
 
                 # Larger font attempt:
                 try:
-                    # If you have 'arial.ttf' installed, you can specify its path/name here
-                    font = ImageFont.truetype("arial.ttf", 28)
+                    font = ImageFont.truetype("arial.ttf", 28)  # If you have Arial installed
                 except:
-                    # Fallback to default font if TTF not found
                     font = ImageFont.load_default()
 
                 draw = ImageDraw.Draw(new_img)
-                # textbbox returns (left, top, right, bottom)
-                bbox = draw.textbbox((0, 0), watermark_text, font=font)
+                bbox = draw.textbbox((0, 0), watermark_text, font=font)  # (left, top, right, bottom)
                 text_width = bbox[2] - bbox[0]
                 text_height = bbox[3] - bbox[1]
 
                 x = (new_img.width - text_width) // 2
                 y = img.height + (banner_height - text_height) // 2
                 draw.text((x, y), watermark_text, fill="white", font=font)
+
                 img = new_img
 
-            # --- Metadata (PNG only) ---
+            # Metadata (PNG only)
             pnginfo = None
             if image_format.lower() == "png" and save_metadata:
                 pnginfo = PngInfo()
@@ -129,7 +127,7 @@ class rk_save_image_v01:
                     for k, v in extra_pnginfo.items():
                         pnginfo.add_text(k, json.dumps(v))
 
-            # --- Save to ComfyUI folder (for preview) ---
+            # Save to ComfyUI folder (for preview)
             file_name = f"{filename_prefix}_{counter:05}.{image_format.lower()}"
             comfyui_full_path = os.path.join(comfyui_output_dir, file_name)
 
@@ -138,7 +136,7 @@ class rk_save_image_v01:
             else:
                 img.save(comfyui_full_path, optimize=True)
 
-            # --- If custom path is enabled, save second copy ---
+            # If custom path is enabled, save second copy
             if custom_dir:
                 custom_full_path = os.path.join(custom_dir, file_name)
                 if image_format.lower() == "png":
@@ -160,7 +158,7 @@ class rk_save_image_v01:
 
             counter += 1
 
-        # --- Optionally open explorer (ComfyUI folder) ---
+        # Optionally open explorer (ComfyUI folder)
         if open_explorer_after_saving:
             if platform.system() == "Windows":
                 os.startfile(comfyui_output_dir)
