@@ -1,0 +1,244 @@
+import os
+import json
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+from PIL.PngImagePlugin import PngInfo
+import folder_paths
+import platform
+import subprocess
+
+class rk_save_image_v01_updated: # Renamed class slightly for clarity
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+                "filename_prefix": ("STRING", {"default": "ComfyUI"}),
+                "save_metadata": ("BOOLEAN", {"default": True}),
+                "image_format": (["png","jpeg","webp"],),
+                "open_explorer_after_saving": ("BOOLEAN", {"default": False}),
+                "enable_watermark": ("BOOLEAN", {"default": False}),
+                "enable_custom_path": ("BOOLEAN", {"default": False}),
+            },
+            "optional": { # Moved optional items here for better organization
+                "watermark_text": ("STRING", {"default": "Test"}),
+                "custom_path": ("STRING", {"default": "E:/Image_output/CB"}),
+                # --- New Input ---
+                "custom_prompt_text": ("STRING", {
+                    "default": "",
+                    "multiline": True, # Allow multi-line input for longer text
+                    "dynamicPrompts": False # Usually good practice for string inputs
+                }),
+            },
+            "hidden": {
+                "prompt": "PROMPT",
+                "extra_pnginfo": "EXTRA_PNGINFO"
+            },
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "save_images"
+    OUTPUT_NODE = True
+    CATEGORY = "RK_tools_v02" # Or maybe "RK_tools_v03" if you want to version it
+
+    def save_images(self,
+                    images,
+                    filename_prefix="ComfyUI",
+                    save_metadata=True,
+                    image_format="png",
+                    open_explorer_after_saving=False,
+                    enable_watermark=False,
+                    enable_custom_path=False,
+                    # Optional inputs now kwargs with defaults
+                    watermark_text="Test",
+                    custom_path="E:/Image_output/CB",
+                    custom_prompt_text="", # Added new parameter
+                    prompt=None,
+                    extra_pnginfo=None):
+        """
+        Saves images, optionally with metadata, watermark, and to a custom path.
+        Includes option to embed custom text into PNG metadata.
+        """
+
+        # (1) ComfyUI default output folder
+        comfyui_output_dir = folder_paths.get_output_directory()
+        os.makedirs(comfyui_output_dir, exist_ok=True)
+
+        # (2) Optional custom folder (second copy)
+        custom_dir = None
+        if enable_custom_path and custom_path and custom_path.strip():
+            sanitized_path = custom_path.strip().replace('"', '').replace("'", '')
+            custom_dir = sanitized_path
+            try:
+                os.makedirs(custom_dir, exist_ok=True)
+            except Exception as e:
+                print(f"Warning: Could not create custom directory '{custom_dir}'. Error: {e}")
+                custom_dir = None # Disable custom path if creation fails
+
+        # Find highest existing number in ComfyUI's folder
+        existing_files = [
+            f for f in os.listdir(comfyui_output_dir)
+            if f.startswith(filename_prefix) and f.lower().endswith(f'.{image_format.lower()}')
+        ]
+        highest_num = 0
+        for file in existing_files:
+            parts = file.split('_')
+            if len(parts) > 1:
+                try:
+                    num_str = parts[-1].split('.')[0]
+                    num = int(num_str)
+                    highest_num = max(highest_num, num)
+                except ValueError:
+                    pass # Ignore files that don't end with _number.ext
+
+        counter = highest_num + 1
+        results = []
+
+        for image in images:
+            # Convert tensor to PIL
+            arr = 255.0 * image.cpu().numpy()
+            img = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+            original_img_for_metadata = img # Keep original before watermark for metadata size
+
+            # Watermark
+            if enable_watermark:
+                banner_height = 50
+                new_img = Image.new('RGB', (img.width, img.height + banner_height), color='black')
+                new_img.paste(img, (0, 0))
+
+                try:
+                    # Try a common system font first, fallback to default
+                    font_path = "arial.ttf" if platform.system() == "Windows" else "Arial.ttf" # Basic OS check
+                    try:
+                        font = ImageFont.truetype(font_path, 28)
+                    except IOError:
+                         # Try common Linux/macOS paths if Arial fails
+                         try:
+                             font = ImageFont.truetype("DejaVuSans.ttf", 28) # Common on Linux
+                         except IOError:
+                             try:
+                                 font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial.ttf", 28) # macOS
+                             except IOError:
+                                 print("Warning: Could not find Arial or DejaVuSans font. Using default PIL font.")
+                                 font = ImageFont.load_default() # Fallback
+                except Exception as e:
+                     print(f"Warning: Error loading font. Using default PIL font. Error: {e}")
+                     font = ImageFont.load_default()
+
+
+                draw = ImageDraw.Draw(new_img)
+                # Use textbbox for better centering calculation
+                try:
+                    bbox = draw.textbbox((0, 0), watermark_text, font=font)
+                    text_width = bbox[2] - bbox[0]
+                    text_height = bbox[3] - bbox[1]
+                except AttributeError: # Older PIL might not have textbbox
+                    text_width, text_height = draw.textsize(watermark_text, font=font)
+
+
+                x = (new_img.width - text_width) // 2
+                y = img.height + (banner_height - text_height) // 2
+                draw.text((x, y), watermark_text, fill="white", font=font)
+
+                img = new_img # Use the watermarked image for saving
+
+            # Metadata (PNG only)
+            pnginfo = None
+            if image_format.lower() == "png" and save_metadata:
+                pnginfo = PngInfo()
+                if prompt is not None:
+                    # Ensure prompt is serializable
+                    try:
+                        pnginfo.add_text("prompt", json.dumps(prompt))
+                    except TypeError as e:
+                         print(f"Warning: Could not serialize prompt for metadata. Error: {e}")
+                if extra_pnginfo is not None:
+                    for k, v in extra_pnginfo.items():
+                         # Ensure extra_pnginfo values are serializable
+                         try:
+                             pnginfo.add_text(k, json.dumps(v))
+                         except TypeError as e:
+                             print(f"Warning: Could not serialize extra_pnginfo key '{k}'. Error: {e}")
+
+                # --- Add Custom Prompt Text ---
+                if custom_prompt_text and custom_prompt_text.strip():
+                    # Save the raw string directly, no need for json.dumps
+                    pnginfo.add_text("custom_prompt", custom_prompt_text.strip())
+                # --- End Custom Prompt Text ---
+
+
+            # Save to ComfyUI folder (for preview)
+            file_name = f"{filename_prefix}_{counter:05}.{image_format.lower()}"
+            comfyui_full_path = os.path.join(comfyui_output_dir, file_name)
+
+            save_kwargs = {"optimize": True}
+            if image_format.lower() == "png" and pnginfo is not None:
+                 save_kwargs["pnginfo"] = pnginfo
+            elif image_format.lower() == "webp":
+                 # Add quality settings for webp if desired
+                 save_kwargs["quality"] = 90 # Example quality
+                 save_kwargs["method"] = 6 # Example compression method (0-6, 6 is slowest/best)
+            elif image_format.lower() == "jpeg":
+                 save_kwargs["quality"] = 95 # Example quality
+                 save_kwargs["subsampling"] = 0 # Keep chroma subsampling high quality
+
+            try:
+                img.save(comfyui_full_path, **save_kwargs)
+            except Exception as e:
+                 print(f"Error saving image to ComfyUI path: {comfyui_full_path}. Error: {e}")
+                 continue # Skip to next image if save fails
+
+
+            # If custom path is enabled, save second copy
+            if custom_dir:
+                custom_full_path = os.path.join(custom_dir, file_name)
+                try:
+                    img.save(custom_full_path, **save_kwargs)
+                except Exception as e:
+                    print(f"Error saving image to custom path: {custom_full_path}. Error: {e}")
+                    # Don't skip, the ComfyUI save might have succeeded
+
+            # Gather resolution (use original image size if watermarked, otherwise final)
+            # ComfyUI usually gets this from the tensor anyway, but good practice
+            width, height = original_img_for_metadata.size
+
+            # Add to results so ComfyUI displays them
+            results.append({
+                "filename": file_name,
+                "subfolder": "", # ComfyUI determines subfolder relative to base output dir
+                "type": "output",
+                "width": width, # Report original width
+                "height": height # Report original height
+            })
+
+            counter += 1
+
+        # Optionally open explorer (ComfyUI folder)
+        if open_explorer_after_saving and comfyui_output_dir:
+            try:
+                if platform.system() == "Windows":
+                    os.startfile(comfyui_output_dir)
+                elif platform.system() == "Darwin":  # macOS
+                    subprocess.run(["open", comfyui_output_dir], check=True)
+                else:  # Linux / other
+                    subprocess.run(["xdg-open", comfyui_output_dir], check=True)
+            except Exception as e:
+                print(f"Warning: Could not open output directory '{comfyui_output_dir}'. Error: {e}")
+
+
+        # Return UI info only; no pipeline outputs
+        return {
+            "ui": {
+                "images": results
+            }
+        }
+
+
+# Register the node
+NODE_CLASS_MAPPINGS = {
+    "rk_save_image_v01_updated": rk_save_image_v01_updated # Use the new class name
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "rk_save_image_v01_updated": "RK Save Image v01 (Custom Prompt)" # Update display name
+}
